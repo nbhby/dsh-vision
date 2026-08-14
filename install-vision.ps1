@@ -243,10 +243,19 @@ if (-not (Test-Path (Join-Path $src 'lib\index.js'))) {
     try {
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
         Invoke-WebRequest -Uri $SourceUrl -OutFile $tmpZip -UseBasicParsing
-        Expand-Archive -Path $tmpZip -DestinationPath $tmpDir -Force
     } catch {
-        Write-Err "download failed: $($_.Exception.Message)"; exit 1
+        $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
+        if ($curl) {
+            Write-Step 'Invoke-WebRequest failed; retrying with curl ...'
+            & curl.exe -sSL -o $tmpZip $SourceUrl
+            if ($LASTEXITCODE -ne 0 -or -not (Test-Path $tmpZip)) {
+                Write-Err "download failed (irm + curl): $($_.Exception.Message)"; exit 1
+            }
+        } else {
+            Write-Err "download failed: $($_.Exception.Message)"; exit 1
+        }
     }
+    Expand-Archive -Path $tmpZip -DestinationPath $tmpDir -Force
     $found = Get-ChildItem $tmpDir -Recurse -Directory -Filter 'dsh-vision' -ErrorAction SilentlyContinue |
         Where-Object { Test-Path (Join-Path $_.FullName 'lib\index.js') } |
         Select-Object -First 1
