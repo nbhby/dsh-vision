@@ -400,40 +400,55 @@ async function apply(ctx, config) {
   }
 
   // ── pasted-image conversion (text-only routes) ─────────────────────
-  function toHintText(ref) {
+  function toHintText(ref, source) {
     const slim = { attachmentId: ref.attachmentId, mediaType: ref.mediaType, bytes: ref.bytes };
     if (typeof ref.width === "number") slim.width = ref.width;
     if (typeof ref.height === "number") slim.height = ref.height;
     if (typeof ref.name === "string" && ref.name.length > 0) slim.name = ref.name;
     const label = typeof ref.name === "string" && ref.name.length > 0 ? '"' + ref.name + '"' : "一张图片";
-    return "[用户粘贴了" + label + "（" + (ref.mediaType || "image") + "，" + (ref.bytes ?? "?") + " 字节）。当前模型不能直接查看图片，请调用 vision_analyze 工具，并把 image 参数设置为这个附件引用 JSON：" + JSON.stringify(slim) + "]";
+    const prefix = source === "tool" ? "工具返回了" + label + "（图片）" : "用户粘贴了" + label;
+    return "[" + prefix + "（" + (ref.mediaType || "image") + "，" + (ref.bytes ?? "?") + " 字节）。当前模型不能直接查看图片，请调用 vision_analyze 工具，并把 image 参数设置为这个附件引用 JSON：" + JSON.stringify(slim) + "]";
+  }
+
+  // Recursively replace image blocks with text hints; returns null when
+  // nothing changed. Handles top-level pasted images and images nested
+  // inside tool-result blocks (e.g. a read_image tool result).
+  function transformContent(content) {
+    let changed = false;
+    const out = [];
+    for (const block of content) {
+      if (block !== null && typeof block === "object" && block.type === "image" && block.attachment !== undefined) {
+        changed = true;
+        out.push({ type: "text", text: toHintText(block.attachment, "pasted") });
+      } else if (block !== null && typeof block === "object" && block.type === "tool-result" && Array.isArray(block.content)) {
+        const nested = transformContent(block.content);
+        if (nested !== null) {
+          changed = true;
+          out.push({ ...block, content: nested });
+        } else {
+          out.push(block);
+        }
+      } else {
+        out.push(block);
+      }
+    }
+    return changed ? out : null;
   }
 
   function transformUserMessages(messages) {
     let changed = false;
     const out = [];
     for (const message of messages) {
-      if (message === null || typeof message !== "object" || message.role !== "user" || !Array.isArray(message.content)) {
+      if (message === null || typeof message !== "object" || !Array.isArray(message.content)) {
         out.push(message);
         continue;
       }
-      const content = message.content;
-      const hasImage = content.some(
-        (block) => block !== null && typeof block === "object" && block.type === "image" && block.attachment !== undefined
-      );
-      if (!hasImage) {
+      const nextContent = transformContent(message.content);
+      if (nextContent === null) {
         out.push(message);
         continue;
       }
       changed = true;
-      const nextContent = [];
-      for (const block of content) {
-        if (block !== null && typeof block === "object" && block.type === "image" && block.attachment !== undefined) {
-          nextContent.push({ type: "text", text: toHintText(block.attachment) });
-        } else {
-          nextContent.push(block);
-        }
-      }
       out.push({ ...message, content: nextContent });
     }
     return changed ? out : null;
@@ -460,12 +475,28 @@ async function apply(ctx, config) {
     }
   }
 
+  // The deepseek adapter's wire format is text-only (its chat()
+  // rejects image blocks) even though the admission bridge below
+  // advertises image input, so its messages must ALWAYS be converted.
+  function deepseekRoute(agent) {
+    let provider;
+    try {
+      const header = agent.session.requestHeader();
+      const routed = header && header.config;
+      provider = (routed && routed.provider) ?? agent.options?.provider;
+    } catch {
+      return false;
+    }
+    return provider === "deepseek";
+  }
+
   if (convertPastedImages) {
     ctx.on("agent/pre-step", async ({ agent, messages, step, signal }, next) => {
       const decision = await next();
       if (decision === undefined || decision.kind !== "enter") return decision;
       try {
-        if (await routeAcceptsImages(agent, signal)) return decision;
+        const convert = deepseekRoute(agent) || !(await routeAcceptsImages(agent, signal));
+        if (!convert) return decision;
         const transformed = transformUserMessages(decision.messages);
         if (transformed === null) return decision;
         return { kind: "enter", messages: transformed };
@@ -473,6 +504,29 @@ async function apply(ctx, config) {
         if (ctx.logger && ctx.logger.warn) ctx.logger.warn("[vision] pre-step transform skipped: " + ((error && error.message) || String(error)));
         return decision;
       }
+    });
+  }
+
+  // ── image-admission bridge ─────────────────────────────────────────
+  // The DeepSeek adapter is text-only on the wire, but its catalog
+  // advertises inputModalities: ["text"], so the api-proxy prompt
+  // admission rejects pasted images BEFORE the agent loop can convert
+  // them (client toast: "当前模型不支持图片"). We advertise image input
+  // for the deepseek provider so the admission passes; the pre-step
+  // transform above then converts every image block into a text hint
+  // before any wire request, so the adapter never receives bytes.
+  // The patch is restored when this plugin stops or is removed.
+  if (llm !== undefined && typeof llm.resolveModelInfo === "function") {
+    const baseResolveModelInfo = llm.resolveModelInfo;
+    llm.resolveModelInfo = async (provider, model, signal) => {
+      const info = await baseResolveModelInfo.call(llm, provider, model, signal);
+      if (provider === "deepseek" && info !== null && typeof info === "object" && Array.isArray(info.inputModalities) && !info.inputModalities.includes("image")) {
+        return { ...info, inputModalities: [...info.inputModalities, "image"] };
+      }
+      return info;
+    };
+    ctx.effect(() => () => {
+      if (llm !== undefined && llm.resolveModelInfo !== undefined) llm.resolveModelInfo = baseResolveModelInfo;
     });
   }
 
@@ -488,7 +542,7 @@ async function apply(ctx, config) {
     console.log("[vision] first use OK: model=" + model + " key=" + (apiKeySource ? apiKeySource : "configured"));
   }
 
-  console.log("[vision] ready: model=" + modelPreset + " base=" + baseUrl + " convertPastedImages=" + convertPastedImages + " (key resolved on first use)");
+  console.log("[vision] ready: model=" + modelPreset + " base=" + baseUrl + " convertPastedImages=" + convertPastedImages + " admissionBridge=" + (llm !== undefined && typeof llm.resolveModelInfo === "function" ? "on" : "off") + " (key resolved on first use)");
 }
 
 export { apply, inject, name };

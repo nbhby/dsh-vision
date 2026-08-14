@@ -64,6 +64,14 @@ async function main() {
     };
   }
 
+  const llmMock = {
+    async resolveModelInfo(provider) {
+      if (provider === "deepseek") return { provider, id: "deepseek-chat", name: "DeepSeek", inputModalities: ["text"] };
+      if (provider === "pi-ai") return { provider, id: "img-model", name: "Pi", inputModalities: ["text", "image"] };
+      return { provider, id: "?", name: "?" };
+    },
+  };
+
   const ctx = {
     subprocess: {
       async resolveExecutable() { return "C:\\Windows\\System32\\curl.exe"; },
@@ -80,8 +88,10 @@ async function main() {
     on(name, listener) { if (name === "agent/pre-step") preStepListener = listener; },
     get(name) {
       if (name === "credentials") return { resolve: async () => ({ value: TEST_KEY }) };
+      if (name === "llm") return llmMock;
       return undefined;
     },
+    effect() {},
     logger: { warn() {} },
   };
 
@@ -90,6 +100,16 @@ async function main() {
     baseUrl: process.env.DSH_VISION_BASE_URL || "https://dashscope.aliyuncs.com/compatible-mode/v1",
   });
   check("apply() + tool registration", registered !== null && registered.name === "vision_analyze", registered && registered.name);
+
+  // ---- admission bridge: deepseek now advertises image input ----
+  const infoDeepseek = await ctx.get("llm").resolveModelInfo("deepseek", "deepseek-chat");
+  const infoPi = await ctx.get("llm").resolveModelInfo("pi-ai", "img-model");
+  check(
+    "admission bridge advertises image for deepseek",
+    Array.isArray(infoDeepseek.inputModalities) && infoDeepseek.inputModalities.includes("image"),
+    infoDeepseek.inputModalities && infoDeepseek.inputModalities.join(",")
+  );
+  check("other providers unchanged", Array.isArray(infoPi.inputModalities) && infoPi.inputModalities.includes("image") && infoPi.inputModalities.length === 2, infoPi.inputModalities && infoPi.inputModalities.join(","));
 
   // ---- 3+4. real API call ----
   const dataUrl = "data:image/png;base64," + PNG_32x32;
@@ -130,6 +150,51 @@ async function main() {
     const blocks = decision.messages[1].content;
     const ok = decision.kind === "enter" && blocks.length === 2 && blocks[1].type === "text" && blocks[1].text.includes("vision_analyze") && blocks[1].text.includes("sha256:abc123");
     check("pre-step transform", ok, ok ? blocks[1].text.slice(0, 80) + "..." : JSON.stringify(blocks).slice(0, 160));
+
+    // deepseek must convert even though the bridge advertises image input
+    const messages2 = [
+      {
+        id: "m3",
+        role: "user",
+        content: [
+          { type: "text", text: "text" },
+          {
+            type: "tool-result",
+            callId: "call1",
+            content: [
+              { type: "text", text: "envelope" },
+              { type: "image", attachment: { attachmentId: "sha256:def456", mediaType: "image/jpeg", bytes: 9, width: 100, height: 100 } },
+            ],
+          },
+        ],
+      },
+    ];
+    const decision2 = await preStepListener(
+      { agent: { session: { requestHeader: () => undefined }, options: { provider: "deepseek", model: "deepseek-chat" } }, messages: messages2, step: 2, signal: new AbortController().signal },
+      async () => ({ kind: "enter", messages: messages2 })
+    );
+    const blocks2 = decision2.messages[0].content;
+    const nestedOk = blocks2[1].type === "tool-result" && Array.isArray(blocks2[1].content) && blocks2[1].content[1].type === "text" && blocks2[1].content[1].text.includes("vision_analyze") && blocks2[1].content[1].text.includes("sha256:def456");
+    check("deepseek tool-result nested image converted", nestedOk, nestedOk ? blocks2[1].content[1].text.slice(0, 80) + "..." : JSON.stringify(blocks2).slice(0, 160));
+
+    // an image-capable route (pi-ai) keeps native image blocks
+    const messages3 = [
+      {
+        id: "m4",
+        role: "user",
+        content: [
+          { type: "text", text: "look" },
+          { type: "image", attachment: { attachmentId: "sha256:ghi789", mediaType: "image/png", bytes: 5, width: 640, height: 480 } },
+        ],
+      },
+    ];
+    const decision3 = await preStepListener(
+      { agent: { session: { requestHeader: () => undefined }, options: { provider: "pi-ai", model: "img-model" } }, messages: messages3, step: 1, signal: new AbortController().signal },
+      async () => ({ kind: "enter", messages: messages3 })
+    );
+    const blocks3 = decision3.messages[0].content;
+    const piOk = blocks3.length === 2 && blocks3[1].type === "image";
+    check("image-capable route (pi-ai) keeps images", piOk, piOk ? "image block preserved" : JSON.stringify(blocks3).slice(0, 160));
   }
 
   console.log(failures === 0 ? "vision-smoke: ALL CHECKS PASSED" : "vision-smoke: " + failures + " CHECK(S) FAILED");

@@ -3,7 +3,7 @@
 把 [claude-vision-skill](https://github.com/asuojun/claude-vision-skill) 迁移为 DeepSeek Harness 的**长期可用、随重启保留、可模块化安装**的全局插件：让 DeepSeek 这类没有视觉能力的模型也能"看图"。
 
 - **vision_analyze 工具**：把图片（本地路径 / http(s) URL / data URL / 聊天里粘贴的图片附件）发给外部视觉模型（默认预设 **`qwen3.8-max`**，阿里云百炼 OpenAI 兼容接口），返回文字描述。对所有会话全局可用。
-- **粘贴图片自动处理**：在聊天框直接粘贴图片时，`agent/pre-step` 会把图片块改写为"请用 vision_analyze 分析"的文字提示（携带附件引用），**避免纯文本模型因图片内容报错**；若当前路由的模型本身支持图片输入（`inputModalities` 含 `image`），则不做改写。
+- **粘贴图片自动处理**：在聊天框直接粘贴图片时，插件给 deepseek 路由**桥接图片准入**（`resolveModelInfo` 宣告 image 输入，绕过"当前模型不支持图片"拦截），再由 `agent/pre-step` 把图片块改写为"请用 vision_analyze 分析"的文字提示（携带附件引用），**避免纯文本模型因图片内容报错**；若当前路由的模型本身支持图片输入（如 pi-ai 图像模型），则不做改写，图片原生处理。
 - **系统提示引导**：全局注册一条识图指引段，让智能体知道该调用 `vision_analyze`。
 - **API Key 走凭据服务**：`ctx.credentials` 解析 `DASHSCOPE_API_KEY`（环境变量 > `~/.dsh/.credentials.yaml` > 启动目录 `.env` > `~/.dsh/.env`），配置不落盘密钥。
 

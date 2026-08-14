@@ -21,7 +21,7 @@ This project is a migration of [**asuojun/claude-vision-skill**](https://github.
 ## Features / 特性
 
 - **`vision_analyze` tool, global for every session** — analyzes images from a local path, an http(s) URL, a `data:` URL, or a pasted-image attachment reference; works with any text-only model. / 全局 `vision_analyze` 工具：支持本地路径、URL、data URL、粘贴图片附件引用，任何纯文本模型都能用。
-- **Pasted images just work** — an `agent/pre-step` listener rewrites pasted-image blocks into analysis hints carrying the attachment ref, so text-only routes (DeepSeek) never crash on image content. Skipped automatically when the routed model already declares image input. / 粘贴图片直接可用：`agent/pre-step` 监听器把图片块改写为带附件引用的分析提示，纯文本路由不再因图片内容报错；路由模型本身支持图片时自动跳过。
+- **Pasted images just work** — the plugin bridges the image admission gate (the deepseek route advertises image input, so the api-proxy no longer rejects pasted images with "current model does not support images"), then an `agent/pre-step` listener rewrites image blocks into analysis hints carrying the attachment ref, so the text-only wire never receives bytes. Skipped automatically for routes that natively carry images (e.g. pi-ai image models). / 粘贴图片直接可用：插件桥接图片准入（deepseek 路由宣告 image 输入，不再被"当前模型不支持图片"拦截），再由 `agent/pre-step` 把图片块改写为带附件引用的分析提示，纯文本线上永不收到图片字节；原生支持图片的路由自动跳过。
 - **Persistent & modular** — installs into the DSH store + profile patch, survives restarts, removable with one command. / 持久化、模块化：安装进 DSH store + profile patch，重启不丢，一条命令卸载。
 - **No manual key editing** — the API key is stored through the platform credential seam (`DASHSCOPE_API_KEY`: env > `<DSH_HOME>/.credentials.yaml` > `.env`) and resolved per call; rotation needs no restart. / Key 零手动编辑：走平台凭据服务，每次调用实时解析，轮换无需重启。
 - **Works with both deployment styles** — npx installs and git-clone installs are both auto-detected. / 兼容两种部署：npx 安装与 git clone 安装都能自动发现并安装。
@@ -126,7 +126,8 @@ host process (dsh-vision, lib/index.js)
 │    ├─ image sources: fs (local path) | curl (URL, proxy-aware) | attachments.readImage (pasted)
 │    └─ request: curl POST {baseUrl}/chat/completions (OpenAI-compatible, base64 data URL)
 ├─ systemPrompt.section: vision guidance (order 150)
-└─ agent/pre-step waterfall: image blocks → text hints (skipped for image-capable routes)
+└─ agent/pre-step waterfall: image blocks → text hints (deepseek always; other
+     text-only routes too; skipped for image-capable routes)
      API key: ctx.credentials.resolve(DASHSCOPE_API_KEY) at call time
 ```
 
