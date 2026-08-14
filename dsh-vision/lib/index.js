@@ -395,7 +395,7 @@ async function apply(ctx, config) {
     systemPrompt.section({
       name: "vision:guidance",
       order: 150,
-      text: "识图：当前模型不能直接读取图片。当用户粘贴图片、提供图片路径或图片 URL、或要求看图/识图/描述图片时，调用 vision_analyze 工具（image 参数传图片路径、URL，或粘贴图片附带的附件引用 JSON），用返回的文字描述回答用户。默认视觉模型预设为 qwen3.8-max。",
+      text: "识图：当前模型不能直接读取图片。当用户粘贴图片、提供图片路径或图片 URL、或要求看图/识图/描述图片时，调用 vision_analyze 工具（image 参数传图片路径、URL，或粘贴图片附带的附件引用 JSON），用返回的文字描述回答用户。当用户消息中出现『用户粘贴了…当前模型不能直接查看图片，请调用 vision_analyze 工具，并把 image 参数设置为这个附件引用 JSON：{…}』的提示时，必须立即用该附件引用 JSON 调用 vision_analyze 分析图片，并在回答中直接给出描述，不要询问用户、不要解释无法看图。默认视觉模型预设为 qwen3.8-max。",
     });
   }
 
