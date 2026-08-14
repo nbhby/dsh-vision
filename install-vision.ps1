@@ -56,7 +56,10 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$src = Join-Path $PSScriptRoot 'dsh-vision'
+# $PSScriptRoot is empty when the script runs via "irm ... | iex";
+# fall back to the current directory (the package is then downloaded).
+$scriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
+$src = Join-Path $scriptDir 'dsh-vision'
 $rowId = 'vision'
 
 # ---- resolve paths ----
