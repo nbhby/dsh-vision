@@ -487,7 +487,7 @@ async function apply(ctx, config) {
     } catch {
       return false;
     }
-    return provider === "deepseek";
+    return typeof provider === "string" && (provider === "deepseek" || provider.startsWith("deepseek-"));
   }
 
   if (convertPastedImages) {
@@ -508,19 +508,20 @@ async function apply(ctx, config) {
   }
 
   // ── image-admission bridge ─────────────────────────────────────────
-  // The DeepSeek adapter is text-only on the wire, but its catalog
-  // advertises inputModalities: ["text"], so the api-proxy prompt
-  // admission rejects pasted images BEFORE the agent loop can convert
-  // them (client toast: "当前模型不支持图片"). We advertise image input
-  // for the deepseek provider so the admission passes; the pre-step
-  // transform above then converts every image block into a text hint
-  // before any wire request, so the adapter never receives bytes.
-  // The patch is restored when this plugin stops or is removed.
+  // The DeepSeek adapter (provider id "deepseek-official") is text-only
+  // on the wire, but its catalog advertises inputModalities: ["text"],
+  // so the api-proxy prompt admission rejects pasted images BEFORE the
+  // agent loop can convert them (client toast: "当前模型不支持图片").
+  // We advertise image input for the deepseek provider so the admission
+  // passes; the pre-step transform above then converts every image block
+  // into a text hint before any wire request, so the adapter never
+  // receives bytes. The patch is restored when this plugin stops.
   if (llm !== undefined && typeof llm.resolveModelInfo === "function") {
     const baseResolveModelInfo = llm.resolveModelInfo;
+    const isDeepseekProvider = (provider) => typeof provider === "string" && (provider === "deepseek" || provider.startsWith("deepseek-"));
     llm.resolveModelInfo = async (provider, model, signal) => {
       const info = await baseResolveModelInfo.call(llm, provider, model, signal);
-      if (provider === "deepseek" && info !== null && typeof info === "object" && Array.isArray(info.inputModalities) && !info.inputModalities.includes("image")) {
+      if (isDeepseekProvider(provider) && info !== null && typeof info === "object" && Array.isArray(info.inputModalities) && !info.inputModalities.includes("image")) {
         return { ...info, inputModalities: [...info.inputModalities, "image"] };
       }
       return info;
@@ -528,6 +529,16 @@ async function apply(ctx, config) {
     ctx.effect(() => () => {
       if (llm !== undefined && llm.resolveModelInfo !== undefined) llm.resolveModelInfo = baseResolveModelInfo;
     });
+    // Boot-time self check against the live adapter: proves the bridge is
+    // actually visible on the real llm service (provider id may vary).
+    try {
+      const models = await llm.listModels("deepseek-official").catch(() => []);
+      const probeId = models.length > 0 && models[0].id ? models[0].id : "deepseek-v4-flash";
+      const probe = await llm.resolveModelInfo("deepseek-official", probeId);
+      console.log("[vision] bridge probe: deepseek-official/" + probeId + " inputModalities=" + ((probe && probe.inputModalities) || []).join(","));
+    } catch (error) {
+      console.log("[vision] bridge probe failed: " + ((error && error.message) || String(error)));
+    }
   }
 
   // ── startup log ────────────────────────────────────────────────────

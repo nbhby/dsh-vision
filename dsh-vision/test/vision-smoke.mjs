@@ -66,7 +66,8 @@ async function main() {
 
   const llmMock = {
     async resolveModelInfo(provider) {
-      if (provider === "deepseek") return { provider, id: "deepseek-chat", name: "DeepSeek", inputModalities: ["text"] };
+      // mirrors the real deepseek adapter (provider id "deepseek-official")
+      if (provider === "deepseek-official" || provider === "deepseek") return { provider, id: "deepseek-v4-flash", name: "DeepSeek", inputModalities: ["text"] };
       if (provider === "pi-ai") return { provider, id: "img-model", name: "Pi", inputModalities: ["text", "image"] };
       return { provider, id: "?", name: "?" };
     },
@@ -102,12 +103,18 @@ async function main() {
   check("apply() + tool registration", registered !== null && registered.name === "vision_analyze", registered && registered.name);
 
   // ---- admission bridge: deepseek now advertises image input ----
-  const infoDeepseek = await ctx.get("llm").resolveModelInfo("deepseek", "deepseek-chat");
+  const infoDeepseek = await ctx.get("llm").resolveModelInfo("deepseek-official", "deepseek-v4-flash");
+  const infoDeepseekLegacy = await ctx.get("llm").resolveModelInfo("deepseek", "deepseek-chat");
   const infoPi = await ctx.get("llm").resolveModelInfo("pi-ai", "img-model");
   check(
-    "admission bridge advertises image for deepseek",
+    "admission bridge advertises image for deepseek-official",
     Array.isArray(infoDeepseek.inputModalities) && infoDeepseek.inputModalities.includes("image"),
     infoDeepseek.inputModalities && infoDeepseek.inputModalities.join(",")
+  );
+  check(
+    "admission bridge covers legacy deepseek provider id",
+    Array.isArray(infoDeepseekLegacy.inputModalities) && infoDeepseekLegacy.inputModalities.includes("image"),
+    infoDeepseekLegacy.inputModalities && infoDeepseekLegacy.inputModalities.join(",")
   );
   check("other providers unchanged", Array.isArray(infoPi.inputModalities) && infoPi.inputModalities.includes("image") && infoPi.inputModalities.length === 2, infoPi.inputModalities && infoPi.inputModalities.join(","));
 
@@ -144,7 +151,7 @@ async function main() {
       },
     ];
     const decision = await preStepListener(
-      { agent: { session: { requestHeader: () => undefined }, options: { provider: "deepseek", model: "deepseek-chat" } }, messages, step: 1, signal: new AbortController().signal },
+      { agent: { session: { requestHeader: () => undefined }, options: { provider: "deepseek-official", model: "deepseek-v4-flash" } }, messages, step: 1, signal: new AbortController().signal },
       async () => ({ kind: "enter", messages })
     );
     const blocks = decision.messages[1].content;
@@ -170,7 +177,7 @@ async function main() {
       },
     ];
     const decision2 = await preStepListener(
-      { agent: { session: { requestHeader: () => undefined }, options: { provider: "deepseek", model: "deepseek-chat" } }, messages: messages2, step: 2, signal: new AbortController().signal },
+      { agent: { session: { requestHeader: () => undefined }, options: { provider: "deepseek-official", model: "deepseek-v4-flash" } }, messages: messages2, step: 2, signal: new AbortController().signal },
       async () => ({ kind: "enter", messages: messages2 })
     );
     const blocks2 = decision2.messages[0].content;
