@@ -1,0 +1,16 @@
+{
+  "name": "@deepseek-ai/dsh-vision",
+  "description": "DIY: vision bridge - vision_analyze tool (DashScope preset qwen3.8-max) that gives text-only chat models image understanding; pasted-image support via agent/pre-step.",
+  "version": "0.2.0-diy.1",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./package.json": "./package.json"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@deepseek-ai/dsh-tools": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-credentials": "^0.1.0-rc.6"
+  }
+}

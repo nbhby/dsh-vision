@@ -1,0 +1,16 @@
+# secrets - never commit API keys or tokens
+.credentials.yaml
+*.key
+*.pem
+.env
+.env.*
+
+# local scratch / sandboxes
+.dsh-sandbox/
+.dsh-sandbox-*/
+scratch/
+
+# dependencies / archives
+node_modules/
+*.tgz
+*.zip
