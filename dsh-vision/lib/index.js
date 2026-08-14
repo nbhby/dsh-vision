@@ -26,7 +26,10 @@ import { credentialRef } from "@deepseek-ai/dsh-credentials";
 const name = "dsh-vision";
 
 /** Services the host half reads as ctx properties (cordis requires declarations). */
-const inject = ["subprocess", "fs", "tools"];
+const inject = ["subprocess", "fs", "tools", "timer"];
+
+const GUIDANCE_TEXT =
+  "识图：当前模型不能直接读取图片。当用户粘贴图片、提供图片路径或图片 URL、或要求看图/识图/描述图片时，调用 vision_analyze 工具（image 参数传图片路径、URL，或粘贴图片附带的附件引用 JSON），用返回的文字描述回答用户。当用户消息中出现『用户粘贴了…当前模型不能直接查看图片，请调用 vision_analyze 工具，并把 image 参数设置为这个附件引用 JSON：{…}』的提示时，必须立即用该附件引用 JSON 调用 vision_analyze 分析图片，并在回答中直接给出描述，不要询问用户、不要解释无法看图。默认视觉模型预设为 qwen3.8-max。";
 
 const DEFAULT_MODEL = "qwen3.8-max";
 const DEFAULT_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1";
@@ -98,10 +101,13 @@ async function apply(ctx, config) {
   const cfg = config ?? {};
   const subprocess = ctx.subprocess;
   const fs = ctx.fs;
-  const credentials = ctx.get("credentials");
-  const attachments = ctx.get("attachments");
+  const timer = ctx.get("timer");
+  // NOTE: credentials / attachments / systemPrompt / llm are NOT captured
+  // here — activation order is dependency-driven and these optional
+  // services may register AFTER this plugin's apply runs. They are
+  // resolved at call time (see resolveApiKey / loadAttachment /
+  // registerGuidance), matching dsh-llm-deepseek's pattern.
   const llm = ctx.get("llm");
-  const systemPrompt = ctx.get("systemPrompt");
 
   const modelPreset = typeof cfg.model === "string" && cfg.model.trim().length > 0 ? cfg.model.trim() : DEFAULT_MODEL;
   const baseUrl = typeof cfg.baseUrl === "string" && cfg.baseUrl.trim().length > 0 ? cfg.baseUrl.trim() : DEFAULT_BASE_URL;
@@ -180,10 +186,13 @@ async function apply(ctx, config) {
   await probeEnvironment();
 
   // ── API key ────────────────────────────────────────────────────────
+  // Resolved at CALL time: the credentials service may register after
+  // this plugin activates (activation order is dependency-driven).
   async function resolveApiKey() {
     if (typeof cfg.apiKey === "string" && cfg.apiKey.trim().length > 0) return cfg.apiKey.trim();
-    if (credentials !== undefined) {
-      const hit = await credentials.resolve(credentialRef("DASHSCOPE_API_KEY"));
+    const creds = ctx.get("credentials");
+    if (creds !== undefined) {
+      const hit = await creds.resolve(credentialRef("DASHSCOPE_API_KEY"));
       if (hit !== undefined && typeof hit.value === "string" && hit.value.length > 0) return hit.value;
     }
     throw new Error(
@@ -245,9 +254,10 @@ async function apply(ctx, config) {
   }
 
   async function loadAttachment(ref, signal) {
-    if (attachments === undefined) throw new Error("vision_analyze: 附件服务不可用，无法读取粘贴的图片");
+    const store = ctx.get("attachments");
+    if (store === undefined) throw new Error("vision_analyze: 附件服务不可用，无法读取粘贴的图片");
     if (ref.bytes > maxImageBytes) throw new Error("vision_analyze: 图片过大 (" + ref.bytes + " 字节, 上限 " + maxImageBytes + ")");
-    const { data } = await attachments.readImage(ref, signal);
+    const { data } = await store.readImage(ref, signal);
     return { mime: typeof ref.mediaType === "string" && ref.mediaType.length > 0 ? ref.mediaType : "image/png", bytes: data };
   }
 
@@ -391,12 +401,24 @@ async function apply(ctx, config) {
   ctx.tools.register(visionTool);
 
   // ── guidance section (global, host layer) ──────────────────────────
-  if (systemPrompt !== undefined) {
-    systemPrompt.section({
-      name: "vision:guidance",
-      order: 150,
-      text: "识图：当前模型不能直接读取图片。当用户粘贴图片、提供图片路径或图片 URL、或要求看图/识图/描述图片时，调用 vision_analyze 工具（image 参数传图片路径、URL，或粘贴图片附带的附件引用 JSON），用返回的文字描述回答用户。当用户消息中出现『用户粘贴了…当前模型不能直接查看图片，请调用 vision_analyze 工具，并把 image 参数设置为这个附件引用 JSON：{…}』的提示时，必须立即用该附件引用 JSON 调用 vision_analyze 分析图片，并在回答中直接给出描述，不要询问用户、不要解释无法看图。默认视觉模型预设为 qwen3.8-max。",
-    });
+  // systemPrompt may register after this plugin activates, so register
+  // lazily with a short retry loop when it is not available yet.
+  let guidanceRegistered = false;
+  function registerGuidance() {
+    if (guidanceRegistered) return true;
+    const sp = ctx.get("systemPrompt");
+    if (sp === undefined) return false;
+    sp.section({ name: "vision:guidance", order: 150, text: GUIDANCE_TEXT });
+    guidanceRegistered = true;
+    return true;
+  }
+  if (!registerGuidance() && timer !== undefined) {
+    let guidanceAttempts = 0;
+    const tryGuidance = () => {
+      if (registerGuidance() || ++guidanceAttempts >= 10) return;
+      ctx.timeout(tryGuidance, 3000);
+    };
+    ctx.timeout(tryGuidance, 3000);
   }
 
   // ── pasted-image conversion (text-only routes) ─────────────────────
@@ -551,6 +573,21 @@ async function apply(ctx, config) {
     if (firstUseLogged) return;
     firstUseLogged = true;
     console.log("[vision] first use OK: model=" + model + " key=" + (apiKeySource ? apiKeySource : "configured"));
+  }
+
+  // Delayed boot probe: proves the credentials seam resolves the key at
+  // runtime (services may register after apply). Best-effort logging.
+  if (timer !== undefined) {
+    let keyProbeAttempts = 0;
+    const probeKey = async () => {
+      try {
+        await resolveApiKey();
+        console.log("[vision] key probe: DASHSCOPE_API_KEY configured (credentials seam)");
+      } catch {
+        if (++keyProbeAttempts < 10) ctx.timeout(probeKey, 2000);
+      }
+    };
+    ctx.timeout(probeKey, 2000);
   }
 
   console.log("[vision] ready: model=" + modelPreset + " base=" + baseUrl + " convertPastedImages=" + convertPastedImages + " admissionBridge=" + (llm !== undefined && typeof llm.resolveModelInfo === "function" ? "on" : "off") + " (key resolved on first use)");
